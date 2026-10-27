@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install labdex (for signing)
-        run: pip install "labdex @ git+https://github.com/reykimedev/labdex@main#subdirectory=backend"
+        run: pip install "labdex @ git+https://github.com/labdex-app/labdex@main#subdirectory=backend"
       - name: Check the tag against plugin.yaml
         env:
           TAG: ${{ github.event.release.tag_name }}
@@ -75,7 +75,7 @@ jobs:
           gh release edit "$TAG" --notes-file notes.md   # what you wrote, then this version's CHANGELOG section
       - name: Tell the Marketplace (optional)
         # a fine-grained token with Actions: write on the Marketplace repository (secret MARKETPLACE_TOKEN,
-        # variable MARKETPLACE_REPO, e.g. reykimedev/labdex-plugins); without it the Marketplace
+        # variable MARKETPLACE_REPO, e.g. labdex-app/labdex-plugins); without it the Marketplace
         # picks the release up on its next scheduled run
         if: ${{ vars.MARKETPLACE_REPO != '' }}
         env:
