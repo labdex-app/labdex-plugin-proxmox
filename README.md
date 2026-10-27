@@ -53,4 +53,6 @@ It ships with labdex: **Plugins › Marketplace**, then *Install* (nothing is do
 
 Bump `version` in `plugin.yaml`, add a `## <version>` section to `CHANGELOG.md`, commit, then
 publish a GitHub release tagged `v<version>` (web UI, or `gh release create v<version> --target main --notes ""`).
-The release workflow signs the plugin with the `LABDEX_SIGNING_KEY` secret and attaches `proxmox-<version>.zip` to a GitHub release.
+The release workflow signs the plugin with the `LABDEX_SIGNING_KEY` secret, attaches the zip and
+`CHANGELOG.md` to the release and puts that version's CHANGELOG section into its description.
+Files listed in `.releaseignore` stay out of the zip.

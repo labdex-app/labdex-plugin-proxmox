@@ -4,7 +4,8 @@ name: Release
 # or with `gh release create v1.3 --target main --notes ""`: the plugin is signed with the
 # LABDEX_SIGNING_KEY secret (an Ed25519 key from `labdex plugin keygen`; for official
 # plugins the labdex project key) and attached to that release as <id>-<version>.zip.
-# Empty release notes are filled from that version's CHANGELOG.md section. A Marketplace
+# Files listed in .releaseignore stay out of the zip. The release description gets that
+# version's CHANGELOG.md section (below anything you wrote), and CHANGELOG.md is attached. A Marketplace
 # (labdex plugin build-index) picks the release up from there.
 on:
   release:
@@ -42,28 +43,36 @@ jobs:
           LABDEX_DATA: ${{ runner.temp }}/labdex-data
         run: |
           if [ -z "$LABDEX_SIGNING_KEY" ]; then echo "::error::add the LABDEX_SIGNING_KEY secret"; exit 1; fi
-          mkdir -p "build/$ID" && git archive HEAD | tar -x -C "build/$ID"   # what's committed, without .github (export-ignore)
+          mkdir -p "build/$ID" && git archive HEAD | tar -x -C "build/$ID"   # what's committed
+          labdex plugin prune "build/$ID"   # minus what .releaseignore lists (and .github, .gitignore …)
           umask 077; printf '%s\n' "$LABDEX_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
           labdex plugin sign "build/$ID" --key "$RUNNER_TEMP/key.pem" --signer "${{ vars.LABDEX_SIGNER || github.repository_owner }}"
           rm -f "$RUNNER_TEMP/key.pem"
           labdex plugin pack "build/$ID" -o "$ID-$VER.zip"
       - name: Release notes from CHANGELOG.md
+        env:
+          BODY: ${{ github.event.release.body }}
         run: |
           python3 - <<'PY'
           import os, re
           v = os.environ["VER"]
           log = open("CHANGELOG.md").read() if os.path.exists("CHANGELOG.md") else ""
           m = re.search(rf"^##+\s*\[?v?{re.escape(v)}\]?\b[^\n]*\n(.*?)(?=^##+\s|\Z)", log, re.M | re.S)
-          open("notes.md", "w").write(m.group(1).strip() if m else f"{os.environ['ID']} {v}")
+          section = m.group(1).strip() if m else ""
+          body = os.environ.get("BODY", "").strip()
+          parts = [body] if body else []
+          if section and section not in body:
+              parts.append(f"## Changes in {v}\n\n{section}" if body else section)
+          open("notes.md", "w").write("\n\n".join(parts) or f"{os.environ['ID']} {v}")
           PY
-      - name: Attach the signed plugin to the release
+      - name: Attach the signed plugin and the changelog to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-          BODY: ${{ github.event.release.body }}
         run: |
-          gh release upload "$TAG" "$ID-$VER.zip" --clobber
-          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then gh release edit "$TAG" --notes-file notes.md; fi
+          cp CHANGELOG.md "$ID-CHANGELOG.md" 2>/dev/null || true
+          gh release upload "$TAG" "$ID-$VER.zip" $(ls "$ID-CHANGELOG.md" 2>/dev/null) --clobber
+          gh release edit "$TAG" --notes-file notes.md   # what you wrote, then this version's CHANGELOG section
       - name: Tell the Marketplace (optional)
         # a fine-grained token with Actions: write on the Marketplace repository (secret MARKETPLACE_TOKEN,
         # variable MARKETPLACE_REPO, e.g. reykimedev/labdex-plugins); without it the Marketplace

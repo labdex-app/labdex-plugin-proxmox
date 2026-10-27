@@ -1,0 +1,7 @@
+# Files that stay out of the released plugin zip: one pattern per line, like .gitignore.
+#   tests/        a folder
+#   *.log         any file named like this
+#   docs/x.md     a path from the plugin's root
+# The repository's own files (.git, .github, .gitignore, .gitattributes, this file) never go in.
+tests/
+docs/
