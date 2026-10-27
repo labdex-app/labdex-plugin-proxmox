@@ -1,0 +1,60 @@
+id: proxmox
+name: Proxmox VE
+kind: integration
+tags: [compute, virtualization, discovery]
+provides: [discovery]
+version: "1.2"
+labdex: ">=1.3,<2"
+description: Imports VMs and containers as hosts (a plan you review), links the ones you already have, and reports drift in names, addresses, MACs, node and state. With “Create guests” on, it also creates the VMs and containers you planned in the inventory, as a plan you approve; otherwise it never changes Proxmox.
+pages:
+  - {id: guests, label: Proxmox}
+settings:
+  - {key: url, label: URL, type: string, required: true, placeholder: "https://pve.lab.example.net:8006"}
+  - {key: token_id, label: API token id, type: string, required: true, help: "user@realm!name, e.g. labdex@pve!inventory, with the PVEAuditor role (read-only)"}
+  - {key: token_secret, label: API token secret, type: secret, required: true}
+  - {key: verify_tls, label: Check the TLS certificate, type: bool, default: true}
+  - {key: category, label: Category for imported guests, type: string, default: srv}
+  - {key: templates, label: Import templates too, type: bool, default: false}
+  - {key: guest_agent, label: Ask the QEMU guest agent for addresses, type: bool, default: true}
+  - {key: discovery, label: Guests labdex doesn't know go into Discovery, type: bool, default: true, help: "With their addresses, MAC and name, on every “Check drift”: adopt them there"}
+  - {key: allow_create, label: Create guests, type: bool, default: false, help: "Lets labdex create the VMs and containers you plan in the inventory (always a plan you approve). The token then needs VM.Allocate, VM.Clone, VM.Config.*, VM.PowerMgmt, Datastore.AllocateSpace and SDN.Use, e.g. the PVEVMAdmin role plus Datastore.AllocateSpace on the storage"}
+  - {key: default_node, label: Default node, type: string, help: "For planned hosts whose “Runs on” isn't a Proxmox node"}
+  - {key: storage, label: Storage for new guests, type: string, default: local-lvm}
+  - {key: lxc_template, label: LXC template, type: string, placeholder: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"}
+  - {key: vm_template, label: VM template (id to clone), type: string, placeholder: "9000", help: "A cloud-init template; labdex sets the network, addresses and SSH keys through cloud-init"}
+  - {key: cores, label: Cores, type: int, default: 2, min: 1, max: 128}
+  - {key: memory, label: Memory (MB), type: int, default: 2048, min: 128}
+  - {key: disk, label: Container disk (GB), type: int, default: 8, min: 1, help: "VMs keep their template's disk unless the host asks for more"}
+  - {key: bridge, label: Bridge, type: string, default: vmbr0, help: "VLAN-aware bridge; the tag is the network's VLAN"}
+  - key: bridges
+    label: Bridges per network
+    type: table
+    help: "Only where a network isn't on the default bridge with its VLAN as the tag"
+    columns:
+      - {key: network, label: Network, type: string, required: true}
+      - {key: bridge, label: Bridge, type: string, required: true}
+      - {key: tag, label: VLAN tag (empty = untagged), type: string}
+  - {key: nameserver, label: DNS server for new guests, type: string}
+  - {key: searchdomain, label: Search domain for new guests, type: string}
+  - {key: ssh_public_keys, label: SSH public keys for new guests, type: text}
+  - {key: start, label: Start new guests, type: bool, default: true}
+  - {key: task_timeout, label: Wait for a Proxmox task (seconds), type: int, default: 600, min: 30}
+host_settings:
+  - {key: vmid, label: VM / CT id, type: int}
+  - {key: node, label: Node (last seen), type: string}
+  - {key: guest_type, label: Create as, type: select, options: ["", vm, lxc], help: "Empty: from the name (…-vm-… or …-ct-…)"}
+  - {key: template, label: Template, type: string, help: "Overrides the instance's template for this host"}
+  - {key: cores, label: Cores, type: int}
+  - {key: memory, label: Memory (MB), type: int}
+  - {key: disk, label: Disk (GB), type: int}
+  - {key: storage, label: Storage, type: string}
+  - {key: explained, label: Known differences, type: string, help: "Why this host differs from Proxmox on purpose; explained drift doesn't count as drifting"}
+actions:
+  - {id: test, label: Check connection, mode: run}
+  - {id: import_guests, label: Import guests, mode: plan, description: "One new host per guest labdex doesn't know; guests that match a host by MAC, address or name are linked to it"}
+  - {id: create_guests, label: Create planned guests, mode: plan, description: "A VM or container for every planned host enabled here that has no guest yet; the inventory's addresses, MACs and VLANs go into Proxmox"}
+  - {id: create_guest, label: Create this guest, mode: plan, scope: host}
+  - {id: drift, label: Check drift, mode: run, schedulable: true, schedule_default: 60}
+widgets:
+  - {id: summary, label: Proxmox, where: dashboard}
+  - {id: host, label: Proxmox guest, where: host}

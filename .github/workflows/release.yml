@@ -1,0 +1,70 @@
+name: Release
+
+# Tag a version that matches plugin.yaml (git tag v1.3 && git push --tags):
+# the plugin is signed with the LABDEX_SIGNING_KEY secret (an Ed25519 key from
+# `labdex plugin keygen`; for official plugins the labdex project key) and
+# attached to a GitHub release as <id>-<version>.zip, with that version's
+# CHANGELOG.md section as the release notes. A Marketplace (labdex plugin
+# build-index) picks the release up from there.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install labdex (for signing)
+        run: pip install "labdex @ git+https://github.com/reykimedev/labdex@main#subdirectory=backend"
+      - name: Check the tag against plugin.yaml
+        run: |
+          python3 - <<'PY'
+          import os, yaml
+          m = yaml.safe_load(open("plugin.yaml"))
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{m['version']}":
+              raise SystemExit(f"::error::tag {tag}, but plugin.yaml says version {m['version']}")
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"ID={m['id']}\nVER={m['version']}\n")
+          PY
+      - name: Sign and pack
+        env:
+          LABDEX_SIGNING_KEY: ${{ secrets.LABDEX_SIGNING_KEY }}
+          LABDEX_DATA: ${{ runner.temp }}/labdex-data
+        run: |
+          if [ -z "$LABDEX_SIGNING_KEY" ]; then echo "::error::add the LABDEX_SIGNING_KEY secret"; exit 1; fi
+          mkdir -p "build/$ID" && git archive HEAD | tar -x -C "build/$ID"   # what's committed, without .github (export-ignore)
+          umask 077; printf '%s\n' "$LABDEX_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          labdex plugin sign "build/$ID" --key "$RUNNER_TEMP/key.pem" --signer "${{ vars.LABDEX_SIGNER || github.repository_owner }}"
+          rm -f "$RUNNER_TEMP/key.pem"
+          labdex plugin pack "build/$ID" -o "$ID-$VER.zip"
+      - name: Release notes from CHANGELOG.md
+        run: |
+          python3 - <<'PY'
+          import os, re
+          v = os.environ["VER"]
+          log = open("CHANGELOG.md").read() if os.path.exists("CHANGELOG.md") else ""
+          m = re.search(rf"^##+\s*\[?v?{re.escape(v)}\]?\b[^\n]*\n(.*?)(?=^##+\s|\Z)", log, re.M | re.S)
+          open("notes.md", "w").write(m.group(1).strip() if m else f"{os.environ['ID']} {v}")
+          PY
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ID-$VER.zip" --title "$ID $VER" --notes-file notes.md
+      - name: Tell the Marketplace (optional)
+        # a fine-grained token with Actions: write on the Marketplace repository (secret MARKETPLACE_TOKEN,
+        # variable MARKETPLACE_REPO, e.g. reykimedev/labdex-plugins); without it the Marketplace
+        # picks the release up on its next scheduled run
+        if: ${{ vars.MARKETPLACE_REPO != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.MARKETPLACE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "no MARKETPLACE_TOKEN: the Marketplace picks it up on its next run"; exit 0; fi
+          gh api "repos/${{ vars.MARKETPLACE_REPO }}/dispatches" -f event_type=plugin-released
