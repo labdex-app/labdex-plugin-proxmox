@@ -23,7 +23,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install labdex (for signing)
-        run: pip install "labdex @ git+https://github.com/labdex-app/labdex@main#subdirectory=backend"
+        # a release tag, not main: this job holds the signing key (bump it when signing changes)
+        run: pip install "labdex @ git+https://github.com/labdex-app/labdex@v1.25.0#subdirectory=backend"
       - name: Check the tag against plugin.yaml
         env:
           TAG: ${{ github.event.release.tag_name }}
