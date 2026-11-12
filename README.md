@@ -1,5 +1,7 @@
 # Proxmox VE
 
+[![Release](https://github.com/labdex-app/labdex-plugin-proxmox/actions/workflows/release.yml/badge.svg)](https://github.com/labdex-app/labdex-plugin-proxmox/actions/workflows/release.yml) [![Buy Me a Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-bitsandbricks-7c3aed?logo=buymeacoffee&logoColor=white&labelColor=181b20)](https://buymeacoffee.com/bitsandbricks)
+
 A [labdex](https://github.com/labdex-app/labdex) plugin. Imports VMs and containers as hosts (a plan you review), links the ones you already have, and reports drift in names, addresses, MACs, node and state. With “Create guests” on, it also creates the VMs and containers you planned in the inventory, as a plan you approve; otherwise it never changes Proxmox.
 
 **Version** 1.2 · **Works with** labdex >=1.3,<2 · **Plugin id** `proxmox`
