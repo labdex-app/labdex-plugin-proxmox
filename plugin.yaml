@@ -4,8 +4,8 @@ kind: integration
 tags: [compute, virtualization, discovery]
 provides: [discovery]
 version: "1.2"
-labdex: ">=1.3,<2"
-description: Imports VMs and containers as hosts (a plan you review), links the ones you already have, and reports drift in names, addresses, MACs, node and state. With “Create guests” on, it also creates the VMs and containers you planned in the inventory, as a plan you approve; otherwise it never changes Proxmox.
+labdex: ">=1.26,<2"
+description: Imports VMs and containers as hosts (a plan you review), links the ones you already have, and reports drift in names, addresses, MACs, node and state. Each kind of change is switched on separately and is always a plan a person approves; with all of them off it never changes Proxmox. “Create guests” creates the VMs and containers you planned in the inventory; “Start and stop guests” and “Change cores and memory” bring linked guests in line with the inventory; “Take snapshots” takes them on request and before each change.
 pages:
   - {id: guests, label: Proxmox}
 settings:
@@ -18,6 +18,10 @@ settings:
   - {key: guest_agent, label: Ask the QEMU guest agent for addresses, type: bool, default: true}
   - {key: discovery, label: Guests labdex doesn't know go into Discovery, type: bool, default: true, help: "With their addresses, MAC and name, on every “Check drift”: adopt them there"}
   - {key: allow_create, label: Create guests, type: bool, default: false, help: "Lets labdex create the VMs and containers you plan in the inventory (always a plan you approve). The token then needs VM.Allocate, VM.Clone, VM.Config.*, VM.PowerMgmt, Datastore.AllocateSpace and SDN.Use, e.g. the PVEVMAdmin role plus Datastore.AllocateSpace on the storage"}
+  - {key: allow_power, label: Start and stop guests, type: bool, default: false, help: "Lets “Apply guest settings” start a linked guest that is active in the inventory and shut down one that is offline there (always a plan a person approves). The token then needs VM.PowerMgmt"}
+  - {key: allow_resize, label: Change cores and memory, type: bool, default: false, help: "Lets “Apply guest settings” set the cores and memory of a linked guest to its host's Proxmox settings (always a plan a person approves). The token then needs VM.Config.CPU and VM.Config.Memory"}
+  - {key: allow_snapshots, label: Take snapshots, type: bool, default: false, help: "Lets labdex take a snapshot of a linked guest (always a plan a person approves). The token then needs VM.Snapshot"}
+  - {key: snapshot_before, label: Snapshot before a change, type: bool, default: true, help: "With “Take snapshots” on: a labdex-… snapshot before labdex changes a guest's cores or memory or shuts it down, to roll back to"}
   - {key: default_node, label: Default node, type: string, help: "For planned hosts whose “Runs on” isn't a Proxmox node"}
   - {key: storage, label: Storage for new guests, type: string, default: local-lvm}
   - {key: lxc_template, label: LXC template, type: string, placeholder: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"}
@@ -44,8 +48,8 @@ host_settings:
   - {key: node, label: Node (last seen), type: string}
   - {key: guest_type, label: Create as, type: select, options: ["", vm, lxc], help: "Empty: from the name (…-vm-… or …-ct-…)"}
   - {key: template, label: Template, type: string, help: "Overrides the instance's template for this host"}
-  - {key: cores, label: Cores, type: int}
-  - {key: memory, label: Memory (MB), type: int}
+  - {key: cores, label: Cores, type: int, help: "For a new guest, and what “Apply guest settings” sets on a linked one; empty = left as it is"}
+  - {key: memory, label: Memory (MB), type: int, help: "For a new guest, and what “Apply guest settings” sets on a linked one; empty = left as it is"}
   - {key: disk, label: Disk (GB), type: int}
   - {key: storage, label: Storage, type: string}
   - {key: explained, label: Known differences, type: string, help: "Why this host differs from Proxmox on purpose; explained drift doesn't count as drifting"}
@@ -54,6 +58,15 @@ actions:
   - {id: import_guests, label: Import guests, mode: plan, description: "One new host per guest labdex doesn't know; guests that match a host by MAC, address or name are linked to it"}
   - {id: create_guests, label: Create planned guests, mode: plan, description: "A VM or container for every planned host enabled here that has no guest yet; the inventory's addresses, MACs and VLANs go into Proxmox"}
   - {id: create_guest, label: Create this guest, mode: plan, scope: host}
+  - {id: apply_guests, label: Apply guest settings, mode: plan, approval: always, description: "Linked guests whose power state, cores or memory differ from the inventory, for what is switched on; a person approves every run"}
+  - {id: apply_guest, label: Apply this guest's settings, mode: plan, approval: always, scope: host}
+  - id: snapshot
+    label: Take a snapshot
+    mode: plan
+    approval: always
+    scope: host
+    params:
+      - {key: name, label: Snapshot name, type: string, help: "Letters, digits, - and _, starting with a letter; empty = labdex-<date>-<time>"}
   - {id: drift, label: Check drift, mode: run, schedulable: true, schedule_default: 60}
 widgets:
   - {id: summary, label: Proxmox, where: dashboard}

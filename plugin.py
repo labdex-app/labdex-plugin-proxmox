@@ -1,11 +1,14 @@
 """Proxmox VE: import guests as hosts and report drift (read-only), and, when allowed,
-create the guests you planned in the inventory (VM from a cloud-init template, or LXC)."""
+create the guests you planned in the inventory (VM from a cloud-init template, or LXC), start
+and stop linked guests, change their cores and memory, and take snapshots. Every write is a
+plan a person approves, and each kind is switched on separately."""
 from __future__ import annotations
 
 import hashlib
 import ipaddress
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from labdex.plugins.base import Change, PluginError
@@ -14,6 +17,7 @@ from labdex.plugins.base import Plugin as Base
 PVE_OUI = "bc:24:11"  # what Proxmox itself uses for generated MACs
 DISK_KEYS = ("scsi0", "virtio0", "sata0", "ide0")
 MAC_RE = re.compile(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.I)
+SNAP_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{1,39}$")  # what Proxmox accepts as a snapshot name
 
 
 def _mac(s: str) -> str:
@@ -36,6 +40,12 @@ class _Partial(PluginError):
     def __init__(self, vmid: int, msg: str):
         super().__init__(msg)
         self.vmid = vmid
+
+
+def _int(v, default: int) -> int:
+    """A number from the config; memory may read "current=2048" on newer Proxmox."""
+    m = re.search(r"\d+", str(v if v is not None else ""))
+    return int(m.group(0)) if m else default
 
 
 def _usable(ip: str) -> bool:
@@ -81,6 +91,8 @@ class Plugin(Base):
                 self.log(f"{g['name']}: config not readable ({exc})")
                 conf = {}
             g["description"] = (conf.get("description") or "").strip().splitlines()[0][:200] if conf.get("description") else ""
+            g["cores"] = _int(conf.get("cores"), 1 if conf else 0)
+            g["memory"] = _int(conf.get("memory"), 0)
             for key in sorted(k for k in conf if re.match(r"^net\d+$", k)):
                 kv = _kv(conf[key])
                 mac = _mac(kv.get("hwaddr", "")) if kind == "lxc" else _mac(conf[key])
@@ -651,3 +663,148 @@ class Plugin(Base):
         if failed and not made:
             raise PluginError(f"no guest created ({failed} failed); see the log")
         return {"created": made, "failed": failed}
+
+
+    # ------------------------------------------------------- guest changes
+    # Linked guests only (a host with this instance's “VM / CT id”). Power follows the inventory
+    # status (active = running, offline = stopped; planned hosts are left alone); cores and memory
+    # follow the host's Proxmox settings where they are set. Each kind is switched on separately.
+    def _snapshot_name(self) -> str:
+        return "labdex-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")  # noqa: UP017 (Python 3.10 too)
+
+    def _plan_guests(self, hosts: list[dict]) -> list[Change]:
+        d = self.settings
+        power, resize = bool(d.get("allow_power")), bool(d.get("allow_resize"))
+        if not (power or resize):
+            raise PluginError("guest changes are off: turn on “Start and stop guests” or “Change cores and memory” in this "
+                              "instance's settings (and give the token the privileges listed there)")
+        snap_before = bool(d.get("allow_snapshots")) and bool(d.get("snapshot_before", True))
+        links = self._links()
+        by_host = {name: vmid for vmid, name in links.items()}
+        guests = {g["vmid"]: g for g in self.guests()}
+        changes = []
+        for h in hosts:
+            vmid = by_host.get(h["name"])
+            if vmid is None or h.get("kind") == "vip":
+                continue
+            g = guests.get(vmid)
+            if g is None:
+                self.log(f"{h['name']}: guest {vmid} is no longer in Proxmox, skipped")
+                continue
+            ms = h.get("module_settings") or {}
+            conf, notes = {}, []
+            if resize:
+                for key, unit in (("cores", " cores"), ("memory", " MB")):
+                    want = _int(ms.get(key), 0)
+                    if want and want != g[key]:
+                        conf[key] = want
+                        notes.append(f"{key} {g[key]} → {want}{unit}")
+            action = ""
+            if power and h["status"] == "active" and g["status"] == "stopped":
+                action = "start"
+            elif power and h["status"] == "offline" and g["status"] == "running":
+                action = "shutdown"
+            if action:
+                notes.append("start" if action == "start" else "shut down")
+            if not conf and not action:
+                continue
+            if conf.get("memory") and g["status"] == "running" and action != "start" and g["kind"] == "qemu":
+                notes.append("memory takes effect at the next restart unless memory hotplug is on")
+            snapshot = self._snapshot_name() if snap_before and (conf or action == "shutdown") else ""
+            if snapshot:
+                notes.insert(0, f"snapshot {snapshot} first")
+            what = "LXC" if g["kind"] == "lxc" else "VM"
+            changes.append(Change("update", "guest", h["name"], f"{what} {vmid} on {g['node']}: " + "; ".join(notes),
+                                  before={"status": g["status"], "cores": g["cores"], "memory": g["memory"]},
+                                  after={"status": {"start": "running", "shutdown": "stopped"}.get(action, g["status"]),
+                                         "cores": conf.get("cores", g["cores"]), "memory": conf.get("memory", g["memory"])},
+                                  data={"host": h["name"], "hosts": [h["name"]], "vmid": vmid, "kind": g["kind"],
+                                        "config": conf, "power": action, "snapshot": snapshot}))
+        if not changes:
+            self.log("nothing to change: every linked guest matches the inventory for what is switched on")
+        return changes
+
+    def plan_apply_guests(self, params):
+        return self._plan_guests(self.ctx.hosts(include_offline=True))
+
+    def plan_apply_guest(self, params):
+        h = self.ctx.host(params["host"])
+        if h is None:
+            raise PluginError(f"{params['host']} isn't enabled for {self.ctx.name}")
+        return self._plan_guests([h])
+
+    def _where(self, http, vmid: int) -> tuple[str, str]:
+        """(node, kind) of a guest now: it may have moved since the plan."""
+        for r in self._get(http, "cluster/resources", type="vm") or []:
+            if int(r.get("vmid", -1)) == vmid:
+                return r["node"], r["type"]
+        raise PluginError(f"guest {vmid} is no longer in Proxmox")
+
+    def _snapshot(self, http, node, kind, vmid, name, what):
+        self._wait(http, self._post(http, f"nodes/{node}/{kind}/{vmid}/snapshot",
+                                    {"snapname": name, "description": f"taken by labdex ({self.ctx.name}) {what}"}), f"snapshot {name}")
+
+    def apply_apply_guests(self, changes, params):
+        d = self.settings
+        http = self._api()
+        done, failed = [], []
+        for c in changes:
+            if c.kind != "guest":
+                continue
+            name, vmid, conf, action = c.data["host"], int(c.data["vmid"]), dict(c.data.get("config") or {}), c.data.get("power") or ""
+            # what is switched on now counts, not what was on at planning time
+            if conf and not d.get("allow_resize"):
+                self.log(f"{name}: “Change cores and memory” is off now; cores and memory left as they are")
+                conf = {}
+            if action and not d.get("allow_power"):
+                self.log(f"{name}: “Start and stop guests” is off now; left {'stopped' if action == 'start' else 'running'}")
+                action = ""
+            if not conf and not action:
+                continue
+            try:
+                node, kind = self._where(http, vmid)
+                if c.data.get("snapshot") and d.get("allow_snapshots"):
+                    self._snapshot(http, node, kind, vmid, c.data["snapshot"], "before a change")
+                    self.log(f"{name}: snapshot {c.data['snapshot']}")
+                if conf:
+                    self._put(http, f"nodes/{node}/{kind}/{vmid}/config", conf)
+                    self.log(f"{name}: " + ", ".join(f"{k} {v}" for k, v in conf.items()))
+                if action:
+                    self._wait(http, self._post(http, f"nodes/{node}/{kind}/{vmid}/status/{action}"), f"{action} {name}")
+                    self.log(f"{name}: {'started' if action == 'start' else 'shut down'}")
+                done.append(name)
+            except PluginError as exc:  # one guest failing doesn't stop the others
+                failed.append(name)
+                self.log(f"{name}: {exc}")
+        if failed and not done:
+            raise PluginError(f"no guest changed ({len(failed)} failed); see the log")
+        return {"changed": done, "failed": failed}
+
+    def apply_apply_guest(self, changes, params):
+        return self.apply_apply_guests(changes, params)
+
+    def plan_snapshot(self, params):
+        if not self.settings.get("allow_snapshots"):
+            raise PluginError("snapshots are off: turn on “Take snapshots” in this instance's settings (the token needs VM.Snapshot)")
+        host = params["host"]
+        name = str(params.get("name") or "").strip() or self._snapshot_name()
+        if not SNAP_RE.match(name):
+            raise PluginError(f"snapshot name {name!r}: letters, digits, - and _, starting with a letter, at most 40")
+        vmid = next((v for v, n in self._links().items() if n == host), None)
+        if vmid is None:
+            raise PluginError(f"{host} isn't linked to a guest of {self.ctx.name}")
+        g = next((x for x in self.guests() if x["vmid"] == vmid), None)
+        if g is None:
+            raise PluginError(f"guest {vmid} of {host} is no longer in Proxmox")
+        return [Change("create", "snapshot", f"{host}@{name}", f"snapshot {name} of {'LXC' if g['kind'] == 'lxc' else 'VM'} {vmid} on {g['node']}",
+                       data={"host": host, "hosts": [host], "vmid": vmid, "name": name})]
+
+    def apply_snapshot(self, changes, params):
+        if not self.settings.get("allow_snapshots"):
+            raise PluginError("snapshots are off now; nothing was taken")
+        http = self._api()
+        for c in changes:
+            node, kind = self._where(http, int(c.data["vmid"]))
+            self._snapshot(http, node, kind, int(c.data["vmid"]), c.data["name"], "on request")
+            self.log(f"{c.data['host']}: snapshot {c.data['name']}")
+        return {"snapshots": [c.name for c in changes]}
